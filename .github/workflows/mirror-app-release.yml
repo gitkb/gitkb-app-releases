@@ -1,0 +1,129 @@
+name: Mirror App Release
+
+# Every first-party GitKB app publishes its package here, so GitKB Desktop can
+# install apps without a GitHub token. An app's private repo (gitkb/gitkb-app-<name>)
+# dispatches `app-release-created` after its release assets are uploaded; this
+# workflow re-publishes the identical package under the same tag
+# (gitkb-app-<name>-vX.Y.Z). Tags carry the app name, so all apps share one repo
+# and Desktop picks each app's newest release by tag prefix. Run it by hand to
+# backfill a release.
+
+on:
+  repository_dispatch:
+    types: [app-release-created]
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "App name, e.g. atc for gitkb/gitkb-app-atc"
+        required: true
+      tag:
+        description: "Release tag in the app repo, e.g. gitkb-app-atc-v0.1.49"
+        required: true
+
+concurrency:
+  group: mirror-${{ github.event.client_payload.tag || inputs.tag }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  # Apps allowed to publish here. Adding an app: add its name, and add the
+  # dispatch step to its publish workflow.
+  APPS: atc
+
+jobs:
+  mirror-release:
+    name: Mirror App Package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve app and tag
+        id: info
+        env:
+          DISPATCH_APP: ${{ github.event.client_payload.app }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          INPUT_APP: ${{ inputs.app }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "repository_dispatch" ]; then
+            APP="$DISPATCH_APP"; TAG="$DISPATCH_TAG"
+          else
+            APP="$INPUT_APP"; TAG="$INPUT_TAG"
+          fi
+          read -r -a apps <<<"$APPS"
+          if ! printf '%s\n' "${apps[@]}" | grep -qx -- "$APP"; then
+            echo "::error::App '$APP' is not allowed to publish here (allowed: $APPS)"
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^gitkb-app-${APP}-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "::error::Unsupported tag '$TAG'; expected gitkb-app-${APP}-vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          {
+            echo "source=gitkb/gitkb-app-${APP}"
+            echo "tag=${TAG}"
+            echo "package=gitkb-app-${APP}.gitkbapp"
+            echo "prerelease=$([[ "${TAG##*-v}" == *-* ]] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download the package from the app's release
+        env:
+          GH_TOKEN: ${{ secrets.PARENT_REPO_PAT }}
+          SOURCE: ${{ steps.info.outputs.source }}
+          TAG: ${{ steps.info.outputs.tag }}
+          PACKAGE: ${{ steps.info.outputs.package }}
+        run: |
+          mkdir -p release
+          gh release download "$TAG" --repo "$SOURCE" \
+            --pattern "$PACKAGE" --pattern "$PACKAGE.sha256" --dir release
+
+      - name: Verify inventory and checksum
+        working-directory: release
+        env:
+          PACKAGE: ${{ steps.info.outputs.package }}
+        run: |
+          set -euo pipefail
+          diff -u <(printf '%s\n' "$PACKAGE" "$PACKAGE.sha256" | LC_ALL=C sort) \
+                  <(find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort) || {
+            echo "::error::Downloaded assets are not exactly $PACKAGE and its .sha256"
+            exit 1
+          }
+          sha256sum -c "$PACKAGE.sha256"
+
+      - name: Create public release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ steps.info.outputs.tag }}
+          name: ${{ steps.info.outputs.tag }}
+          prerelease: ${{ steps.info.outputs.prerelease == 'true' }}
+          # Several apps share this repo, so "latest" means nothing; Desktop
+          # selects each app's newest release by tag prefix.
+          make_latest: false
+          body: |
+            GitKB app package `${{ steps.info.outputs.package }}`, mirrored from its ${{ steps.info.outputs.tag }} release. GitKB Desktop installs and updates it automatically.
+          files: release/*
+          fail_on_unmatched_files: true
+          overwrite_files: true
+
+      - name: Verify published assets match the app's release
+        env:
+          PUBLIC_TOKEN: ${{ github.token }}
+          SOURCE_TOKEN: ${{ secrets.PARENT_REPO_PAT }}
+          SOURCE: ${{ steps.info.outputs.source }}
+          TAG: ${{ steps.info.outputs.tag }}
+          PACKAGE: ${{ steps.info.outputs.package }}
+        run: |
+          set -euo pipefail
+          digests() { jq -r '.assets[] | "\(.name) \(.digest)"' | LC_ALL=C sort; }
+          public=$(GH_TOKEN="$PUBLIC_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" | digests)
+          source=$(GH_TOKEN="$SOURCE_TOKEN" gh api "repos/${SOURCE}/releases/tags/${TAG}" \
+            | jq '.assets |= map(select(.name == env.PACKAGE or .name == env.PACKAGE + ".sha256"))' | digests)
+          if [ "$public" != "$source" ]; then
+            echo "::error::Published assets differ from ${SOURCE} ${TAG}"
+            diff <(echo "$source") <(echo "$public") || true
+            exit 1
+          fi
+          echo "$public"
+          echo "Public assets are byte-identical to ${SOURCE} ${TAG}."
