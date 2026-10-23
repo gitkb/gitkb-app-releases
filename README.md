@@ -5,7 +5,8 @@ Public release packages for first-party GitKB apps. GitKB Desktop installs and u
 | App | Package | Tags |
 |-----|---------|------|
 | ATC | `gitkb-app-atc.gitkbapp` | `gitkb-app-atc-vX.Y.Z` |
-| Google Meet | `gitkb-app-gmeet.gitkbapp` | `gitkb-app-gmeet-vX.Y.Z` |
+| Google (Meet, Drive, Gmail, Calendar) | `gitkb-app-google.gitkbapp` | `gitkb-app-google-vX.Y.Z` |
+| Google Meet (before the rename to Google; v0.1.x) | `gitkb-app-gmeet.gitkbapp` | `gitkb-app-gmeet-vX.Y.Z` |
 
 Each release carries the package and its `.sha256`. Apps share this repository, so a release tag always starts with the app's name; there is no single "latest" release.
 

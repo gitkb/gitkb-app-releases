@@ -29,7 +29,7 @@ permissions: {}
 env:
   # Apps allowed to publish here. Adding an app: add its name, and add the
   # dispatch step to its publish workflow.
-  APPS: atc gmeet
+  APPS: atc gmeet google
 
 jobs:
   mirror-release:
